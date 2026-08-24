@@ -1,9 +1,9 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { ComponentRef, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
-  Image,
+  Image as NativeImage,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -14,18 +14,23 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Path } from 'react-native-svg';
 import { ROW_COLORS, cropSuggestions, matchCropGuide } from '../data/crops';
 import { createEntityId } from '../domain/garden';
 import { isoDate } from '../lib/dates';
+import { resolveMediaUri } from '../services/media';
 import { PlantedRow, Point } from '../types';
+import { imageMetrics, imagePointToCanvas, MapSize } from './BedMapOverlay';
+import { GardenImage } from './GardenImage';
+import { InteractiveMapOverlay } from './map/InteractiveMapOverlay';
+import { useMapViewport } from './map/useMapViewport';
 import { palette } from './Ui';
 
 type Mode = 'move' | 'draw' | 'erase';
-type Size = { width: number; height: number };
-type Transform = { scale: number; x: number; y: number };
+type Size = MapSize;
 
 type Props = {
   visible: boolean;
@@ -38,31 +43,6 @@ type Props = {
 };
 
 const cloneRows = (rows: PlantedRow[]) => JSON.parse(JSON.stringify(rows)) as PlantedRow[];
-
-function containMetrics(container: Size, image: Size) {
-  const safeWidth = Math.max(1, image.width);
-  const safeHeight = Math.max(1, image.height);
-  const scale = Math.min(container.width / safeWidth, container.height / safeHeight);
-  const width = safeWidth * scale;
-  const height = safeHeight * scale;
-  return { width, height, offsetX: (container.width - width) / 2, offsetY: (container.height - height) / 2 };
-}
-
-function imagePointToCanvas(point: Point, container: Size, image: Size) {
-  const metrics = containMetrics(container, image);
-  return { x: metrics.offsetX + point.x * metrics.width, y: metrics.offsetY + point.y * metrics.height };
-}
-
-function pathData(points: Point[], container: Size, image: Size) {
-  return points.map((point, index) => {
-    const mapped = imagePointToCanvas(point, container, image);
-    return `${index ? 'L' : 'M'} ${mapped.x} ${mapped.y}`;
-  }).join(' ');
-}
-
-function allStrokes(row: PlantedRow) {
-  return [row.path, ...(row.paths ?? [])].filter((stroke) => stroke.length > 0);
-}
 
 function pointToSegmentDistance(point: Point, start: Point, end: Point) {
   const dx = end.x - start.x;
@@ -87,18 +67,19 @@ export function FullScreenBedEditor({ visible, photoUri, rows, onRowsChange, onE
   const [labelText, setLabelText] = useState('');
   const [size, setSize] = useState<Size>({ width: 1, height: 1 });
   const [imageSize, setImageSize] = useState<Size>({ width: 1, height: 1 });
-  const [transform, setTransform] = useState<Transform>({ scale: 1, x: 0, y: 0 });
+  const [imageLoadError, setImageLoadError] = useState(false);
   const [, setHistoryRevision] = useState(0);
+  const { viewport, pinchGesture, panGesture, imageStyle, zoomPercent, reset: resetViewport, zoomBy } = useMapViewport(size, 8);
   const rowsRef = useRef(rows);
   const selectedIdRef = useRef(selectedId);
-  const transformRef = useRef(transform);
   const sizeRef = useRef(size);
   const imageSizeRef = useRef(imageSize);
-  const interactionRef = useRef<{ kind: 'label' | 'canvas'; rowId?: string; startX: number; startY: number; moved: boolean }>({ kind: 'canvas', startX: 0, startY: 0, moved: false });
-  const panStartRef = useRef<Transform>({ scale: 1, x: 0, y: 0 });
-  const pinchStartRef = useRef<Transform>({ scale: 1, x: 0, y: 0 });
-  const activeStrokeRef = useRef<{ rowId: string; index: number } | null>(null);
+  const activeStrokeRef = useRef<{ rowId: string } | null>(null);
+  const activeStrokePointsRef = useRef<Point[]>([]);
+  const activeStrokeDRef = useRef('');
+  const draftPathRef = useRef<ComponentRef<typeof Path>>(null);
   const eraseChangedRef = useRef(false);
+  const eraseRedoRef = useRef<PlantedRow[][]>([]);
   const undoRef = useRef<PlantedRow[][]>([]);
   const redoRef = useRef<PlantedRow[][]>([]);
 
@@ -114,25 +95,22 @@ export function FullScreenBedEditor({ visible, photoUri, rows, onRowsChange, onE
       return next;
     });
     setMode('move');
-    setViewTransform({ scale: 1, x: 0, y: 0 });
+    resetViewport();
     undoRef.current = [];
     redoRef.current = [];
     setHistoryRevision((value) => value + 1);
   }, [visible]);
 
   useEffect(() => {
-    Image.getSize(photoUri, (width, height) => setImageSize({ width, height }), () => setImageSize({ width: 1, height: 1 }));
+    const resolvedUri = resolveMediaUri(photoUri);
+    setImageLoadError(false);
+    NativeImage.getSize(resolvedUri, (width, height) => setImageSize({ width, height }), () => setImageLoadError(true));
   }, [photoUri]);
 
   useEffect(() => {
     const selectedRow = rows.find((row) => row.id === selectedId);
     if (selectedRow) setSelectedColor(selectedRow.color);
   }, [selectedId, rows]);
-
-  const setViewTransform = (next: Transform) => {
-    transformRef.current = next;
-    setTransform(next);
-  };
 
   const emitRows = (next: PlantedRow[]) => {
     rowsRef.current = next;
@@ -164,40 +142,14 @@ export function FullScreenBedEditor({ visible, photoUri, rows, onRowsChange, onE
   };
 
   const toPoint = (localX: number, localY: number): Point => {
-    const current = transformRef.current;
     const currentSize = sizeRef.current;
-    const contentX = (localX - currentSize.width / 2 - current.x) / current.scale + currentSize.width / 2;
-    const contentY = (localY - currentSize.height / 2 - current.y) / current.scale + currentSize.height / 2;
-    const metrics = containMetrics(currentSize, imageSizeRef.current);
+    const contentX = (localX - currentSize.width / 2 - viewport.translateX.value) / viewport.scale.value + currentSize.width / 2;
+    const contentY = (localY - currentSize.height / 2 - viewport.translateY.value) / viewport.scale.value + currentSize.height / 2;
+    const metrics = imageMetrics(currentSize, imageSizeRef.current, 'contain');
     return {
       x: Math.max(0, Math.min(1, (contentX - metrics.offsetX) / metrics.width)),
       y: Math.max(0, Math.min(1, (contentY - metrics.offsetY) / metrics.height)),
     };
-  };
-
-  const clampTransform = (next: Transform): Transform => {
-    const currentSize = sizeRef.current;
-    const scale = Math.max(1, Math.min(6, next.scale));
-    const maxX = currentSize.width * (scale - 1) / 2;
-    const maxY = currentSize.height * (scale - 1) / 2;
-    return {
-      scale,
-      x: Math.max(-maxX, Math.min(maxX, next.x)),
-      y: Math.max(-maxY, Math.min(maxY, next.y)),
-    };
-  };
-
-  const labelAt = (localX: number, localY: number) => {
-    const currentSize = sizeRef.current;
-    const current = transformRef.current;
-    return [...rowsRef.current].reverse().find((row) => {
-      const anchor = row.labelPosition ?? row.path[0] ?? row.paths?.[0]?.[0];
-      if (!anchor) return false;
-      const mapped = imagePointToCanvas(anchor, currentSize, imageSizeRef.current);
-      const screenX = currentSize.width / 2 + current.x + (mapped.x - currentSize.width / 2) * current.scale;
-      const screenY = currentSize.height / 2 + current.y + (mapped.y - currentSize.height / 2) * current.scale;
-      return Math.abs(localX - screenX) <= 76 && Math.abs(localY - screenY) <= 28;
-    });
   };
 
   const replaceRow = (rowId: string, update: (row: PlantedRow) => PlantedRow) => {
@@ -208,27 +160,47 @@ export function FullScreenBedEditor({ visible, photoUri, rows, onRowsChange, onE
     const rowId = selectedIdRef.current;
     if (!rowId) return;
     pushHistory();
-    const row = rowsRef.current.find((entry) => entry.id === rowId);
-    const index = row?.paths?.length ?? 0;
-    activeStrokeRef.current = { rowId, index };
-    replaceRow(rowId, (entry) => ({ ...entry, paths: [...(entry.paths ?? []), [point]] }));
+    activeStrokeRef.current = { rowId };
+    activeStrokePointsRef.current = [point];
+    const currentSize = sizeRef.current;
+    const canvas = imagePointToCanvas(point, currentSize, imageSizeRef.current);
+    const x = currentSize.width / 2 + viewport.translateX.value + (canvas.x - currentSize.width / 2) * viewport.scale.value;
+    const y = currentSize.height / 2 + viewport.translateY.value + (canvas.y - currentSize.height / 2) * viewport.scale.value;
+    activeStrokeDRef.current = `M ${x} ${y}`;
+    draftPathRef.current?.setNativeProps({ d: activeStrokeDRef.current });
   };
 
   const appendStrokePoint = (point: Point) => {
+    if (!activeStrokeRef.current) return;
+    const points = activeStrokePointsRef.current;
+    const previous = points[points.length - 1];
+    if (previous && Math.hypot(point.x - previous.x, point.y - previous.y) < 0.0025 / viewport.scale.value) return;
+    points.push(point);
+    const currentSize = sizeRef.current;
+    const canvas = imagePointToCanvas(point, currentSize, imageSizeRef.current);
+    const x = currentSize.width / 2 + viewport.translateX.value + (canvas.x - currentSize.width / 2) * viewport.scale.value;
+    const y = currentSize.height / 2 + viewport.translateY.value + (canvas.y - currentSize.height / 2) * viewport.scale.value;
+    activeStrokeDRef.current += ` L ${x} ${y}`;
+    draftPathRef.current?.setNativeProps({ d: activeStrokeDRef.current });
+  };
+
+  const finishStroke = (commit = true) => {
     const active = activeStrokeRef.current;
-    if (!active) return;
-    replaceRow(active.rowId, (row) => {
-      const paths = [...(row.paths ?? [])];
-      const stroke = paths[active.index] ?? [];
-      const previous = stroke[stroke.length - 1];
-      if (previous && Math.hypot(point.x - previous.x, point.y - previous.y) < 0.0025 / transformRef.current.scale) return row;
-      paths[active.index] = [...stroke, point];
-      return { ...row, paths };
-    });
+    const points = activeStrokePointsRef.current;
+    if (commit && active && points.length > 1) {
+      replaceRow(active.rowId, (row) => ({ ...row, paths: [...(row.paths ?? []), points] }));
+    } else {
+      undoRef.current.pop();
+      setHistoryRevision((value) => value + 1);
+    }
+    activeStrokeRef.current = null;
+    activeStrokePointsRef.current = [];
+    activeStrokeDRef.current = '';
+    draftPathRef.current?.setNativeProps({ d: '' });
   };
 
   const eraseAt = (point: Point) => {
-    const threshold = 0.025 / transformRef.current.scale;
+    const threshold = 0.025 / viewport.scale.value;
     let changed = false;
     const next = rowsRef.current.map((row) => {
       const removeLegacy = row.path.length > 0 && strokeHit(row.path, point, threshold);
@@ -239,84 +211,66 @@ export function FullScreenBedEditor({ visible, photoUri, rows, onRowsChange, onE
     });
     if (changed) {
       eraseChangedRef.current = true;
-      emitRows(next);
-      Haptics.selectionAsync();
+      rowsRef.current = next;
     }
   };
 
-  const canvasGesture = useMemo(() => {
-    const pan = Gesture.Pan()
-      .runOnJS(true)
-      .minDistance(3)
-      .maxPointers(1)
-      .onStart((event) => {
-        const label = labelAt(event.x, event.y);
-        interactionRef.current = { kind: label ? 'label' : 'canvas', rowId: label?.id, startX: event.x, startY: event.y, moved: false };
-        panStartRef.current = { ...transformRef.current };
-        activeStrokeRef.current = null;
-        eraseChangedRef.current = false;
+  const selectLabel = (rowId: string) => {
+    selectedIdRef.current = rowId;
+    setSelectedId(rowId);
+    Haptics.selectionAsync();
+  };
 
-        if (label) {
-          selectedIdRef.current = label.id;
-          setSelectedId(label.id);
-          pushHistory();
-        } else if (mode === 'draw' && selectedIdRef.current) {
-          beginStroke(toPoint(event.x, event.y));
-        } else if (mode === 'erase') {
-          pushHistory();
-          eraseAt(toPoint(event.x, event.y));
-        }
-      })
-      .onUpdate((event) => {
-        const interaction = interactionRef.current;
-        interaction.moved = true;
-        if (interaction.kind === 'label' && interaction.rowId) {
-          replaceRow(interaction.rowId, (row) => ({ ...row, labelPosition: toPoint(event.x, event.y) }));
-        } else if (mode === 'draw' && selectedIdRef.current) {
-          appendStrokePoint(toPoint(event.x, event.y));
-        } else if (mode === 'erase') {
-          eraseAt(toPoint(event.x, event.y));
-        } else if (mode === 'move') {
-          const initial = panStartRef.current;
-          setViewTransform(clampTransform({ scale: initial.scale, x: initial.x + event.translationX, y: initial.y + event.translationY }));
-        }
-      })
-      .onFinalize(() => {
-        activeStrokeRef.current = null;
-        if (mode === 'erase' && !eraseChangedRef.current) {
-          undoRef.current.pop();
-          setHistoryRevision((value) => value + 1);
-        }
-      });
+  const moveLabel = (rowId: string, point: Point) => {
+    const row = rowsRef.current.find((entry) => entry.id === rowId);
+    const current = row?.labelPosition ?? row?.path[0] ?? row?.paths?.[0]?.[0] ?? { x: 0.5, y: 0.5 };
+    if (Math.hypot(point.x - current.x, point.y - current.y) < 0.0005) return;
+    pushHistory();
+    replaceRow(rowId, (entry) => ({ ...entry, labelPosition: point }));
+  };
 
-    const tap = Gesture.Tap()
-      .runOnJS(true)
-      .maxDistance(8)
-      .onEnd((event, success) => {
-        if (!success) return;
-        const label = labelAt(event.x, event.y);
-        if (label) {
-          selectedIdRef.current = label.id;
-          setSelectedId(label.id);
-          Haptics.selectionAsync();
-        }
-      });
+  const drawGesture = useMemo(() => Gesture.Pan()
+    .enabled(mode === 'draw' && Boolean(selectedId))
+    .maxPointers(1)
+    .minDistance(2)
+    .runOnJS(true)
+    .onBegin((event) => beginStroke(toPoint(event.x, event.y)))
+    .onUpdate((event) => appendStrokePoint(toPoint(event.x, event.y)))
+    .onFinalize((_event, success) => finishStroke(success)), [mode, selectedId]);
 
-    const pinch = Gesture.Pinch()
-      .runOnJS(true)
-      .onStart(() => { pinchStartRef.current = { ...transformRef.current }; })
-      .onUpdate((event) => {
-        const initial = pinchStartRef.current;
-        const nextScale = Math.max(1, Math.min(6, initial.scale * event.scale));
-        const ratio = nextScale / initial.scale;
-        setViewTransform(clampTransform({ scale: nextScale, x: initial.x * ratio, y: initial.y * ratio }));
-      })
-      .onEnd(() => {
-        if (transformRef.current.scale < 1.03) setViewTransform({ scale: 1, x: 0, y: 0 });
-      });
+  const eraseGesture = useMemo(() => Gesture.Pan()
+    .enabled(mode === 'erase')
+    .maxPointers(1)
+    .minDistance(1)
+    .runOnJS(true)
+    .onBegin((event) => {
+      eraseChangedRef.current = false;
+      eraseRedoRef.current = redoRef.current;
+      pushHistory();
+      eraseAt(toPoint(event.x, event.y));
+    })
+    .onUpdate((event) => eraseAt(toPoint(event.x, event.y)))
+    .onFinalize((_event, success) => {
+      if (!success) {
+        const previous = undoRef.current.pop();
+        if (previous) emitRows(previous);
+        redoRef.current = eraseRedoRef.current;
+      } else if (!eraseChangedRef.current) {
+        undoRef.current.pop();
+        redoRef.current = eraseRedoRef.current;
+      } else {
+        emitRows(rowsRef.current);
+        Haptics.selectionAsync();
+      }
+      setHistoryRevision((value) => value + 1);
+    }), [mode]);
 
-    return Gesture.Simultaneous(pinch, Gesture.Race(pan, tap));
-  }, [mode]);
+  const canvasGesture = useMemo(() => Gesture.Simultaneous(
+    pinchGesture,
+    panGesture.enabled(mode === 'move'),
+    drawGesture,
+    eraseGesture,
+  ), [pinchGesture, panGesture, drawGesture, eraseGesture, mode]);
 
   const addLabel = () => {
     const name = labelText.trim();
@@ -353,7 +307,7 @@ export function FullScreenBedEditor({ visible, photoUri, rows, onRowsChange, onE
     Haptics.selectionAsync();
   };
 
-  const editSelectedText = () => {
+  const openSelectedDetails = () => {
     if (!selectedId) {
       Alert.alert('Select a plant', 'Choose a label below or tap + to add one.');
       return;
@@ -362,62 +316,55 @@ export function FullScreenBedEditor({ visible, photoUri, rows, onRowsChange, onE
   };
 
   const toggleZoom = () => {
-    const zoomed = transformRef.current.scale > 1.05;
-    setViewTransform(zoomed ? { scale: 1, x: 0, y: 0 } : { scale: 2, x: 0, y: 0 });
+    if (viewport.scale.value > 1.05) resetViewport();
+    else zoomBy(2);
     setMode('move');
     Haptics.selectionAsync();
   };
 
   const selected = rows.find((row) => row.id === selectedId);
-  const metrics = containMetrics(size, imageSize);
   const labelSuggestions = cropSuggestions(labelText, 5);
 
   return (
-    <Modal visible={visible} animationType="fade" presentationStyle="fullScreen" onRequestClose={onCancel}>
-      <GestureHandlerRootView style={editorStyles.root}>
-        <GestureDetector gesture={canvasGesture}>
-          <View
-            style={editorStyles.canvas}
-            onLayout={(event) => {
-              const next = { width: event.nativeEvent.layout.width, height: event.nativeEvent.layout.height };
-              sizeRef.current = next;
-              setSize(next);
-            }}
-          >
-          <View style={[editorStyles.content, { width: size.width, height: size.height, transform: [{ translateX: transform.x }, { translateY: transform.y }, { scale: transform.scale }] }]}>
-            <Image
-              source={{ uri: photoUri, cache: 'reload' }}
-              style={{ position: 'absolute', left: metrics.offsetX, top: metrics.offsetY, width: metrics.width, height: metrics.height }}
+    <Modal visible={visible} animationType="none" presentationStyle="fullScreen" onRequestClose={onCancel}>
+      <View style={editorStyles.root}>
+        <View
+          style={editorStyles.canvas}
+          onLayout={(event) => {
+            const next = { width: event.nativeEvent.layout.width, height: event.nativeEvent.layout.height };
+            sizeRef.current = next;
+            setSize(next);
+          }}
+        >
+          <Animated.View style={[StyleSheet.absoluteFill, imageStyle]}>
+            <GardenImage
+              uri={photoUri}
+              style={StyleSheet.absoluteFill}
               resizeMode="contain"
-              fadeDuration={0}
+              highQuality
+              onLoad={(event) => {
+                const source = event.source;
+                if (source.width > 0 && source.height > 0) setImageSize({ width: source.width, height: source.height });
+                setImageLoadError(false);
+              }}
+              onError={() => setImageLoadError(true)}
             />
-            <Svg width={size.width} height={size.height} style={StyleSheet.absoluteFill} pointerEvents="none">
-              {rows.flatMap((row) => allStrokes(row).map((stroke, index) => stroke.length > 1 ? (
-                <Path
-                  key={`${row.id}-${index}`}
-                  d={pathData(stroke, size, imageSize)}
-                  fill="none"
-                  stroke={row.color}
-                  strokeWidth={(row.id === selectedId ? 5 : 3) / transform.scale}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  opacity={row.id === selectedId ? 1 : 0.72}
-                />
-              ) : null))}
-            </Svg>
-            {rows.map((row) => (
-              <PhotoLabel
-                key={row.id}
-                row={row}
-                selected={row.id === selectedId}
-                scale={transform.scale}
-                size={size}
-                imageSize={imageSize}
-              />
-            ))}
-          </View>
-          </View>
-        </GestureDetector>
+          </Animated.View>
+          <GestureDetector gesture={canvasGesture}><Animated.View style={StyleSheet.absoluteFill} /></GestureDetector>
+          <Svg width={size.width} height={size.height} style={StyleSheet.absoluteFill} pointerEvents="none">
+            <Path ref={draftPathRef} d="" fill="none" stroke={selected?.color ?? selectedColor} strokeWidth={5} strokeLinecap="round" strokeLinejoin="round" />
+          </Svg>
+          <InteractiveMapOverlay
+            rows={rows}
+            size={size}
+            imageSize={imageSize}
+            viewport={viewport}
+            selectedId={selectedId}
+            labelsEditable
+            onSelectLabel={selectLabel}
+            onMoveLabel={moveLabel}
+          />
+        </View>
 
         <View style={[editorStyles.topLeft, { top: insets.top + 8 }]} pointerEvents="box-none">
           <EditorIcon icon="close" label="Discard changes" onPress={onCancel} />
@@ -428,13 +375,13 @@ export function FullScreenBedEditor({ visible, photoUri, rows, onRowsChange, onE
         <View style={[editorStyles.topRight, { top: insets.top + 8 }]} pointerEvents="box-none">
           <Pressable accessibilityLabel="Toggle zoom" onPress={toggleZoom} style={editorStyles.zoomPill}>
             <MaterialCommunityIcons name="magnify" size={17} color="#FFFFFF" />
-            <Text style={editorStyles.zoomText}>{Math.round(transform.scale * 100)}%</Text>
+            <Text style={editorStyles.zoomText}>{zoomPercent}%</Text>
           </Pressable>
           <EditorIcon icon="check" label="Save map" onPress={onSave} solid />
         </View>
 
         <View style={[editorStyles.toolRail, { top: insets.top + 64 }]}>
-          <ToolButton icon="format-text" label="Text" active={false} onPress={editSelectedText} />
+          <ToolButton icon="information-outline" label="Details" active={false} onPress={openSelectedDetails} />
           <ToolButton icon="draw" label="Draw" active={mode === 'draw'} onPress={() => changeMode('draw')} />
           <ToolButton icon="eraser" label="Erase" active={mode === 'erase'} onPress={() => changeMode('erase')} />
           <ToolButton icon="gesture-swipe" label="Move" active={mode === 'move'} onPress={() => changeMode('move')} />
@@ -456,7 +403,12 @@ export function FullScreenBedEditor({ visible, photoUri, rows, onRowsChange, onE
           </View>
         </View>
 
-        {!rows.length ? (
+        {imageLoadError ? (
+          <View style={editorStyles.emptyHint} pointerEvents="none">
+            <Text style={editorStyles.emptyHintTitle}>Photo could not be opened</Text>
+            <Text style={editorStyles.emptyHintBody}>Close the editor and try again. Your saved photo and map have not been changed.</Text>
+          </View>
+        ) : !rows.length ? (
           <View style={editorStyles.emptyHint} pointerEvents="none">
             <Text style={editorStyles.emptyHintTitle}>Pinch to zoom · Move to pan</Text>
             <Text style={editorStyles.emptyHintBody}>Tap + below to name your first planting.</Text>
@@ -465,8 +417,16 @@ export function FullScreenBedEditor({ visible, photoUri, rows, onRowsChange, onE
 
         <View style={[editorStyles.bottomPanel, { paddingBottom: Math.max(insets.bottom, 10) }]} pointerEvents="box-none">
           <View style={editorStyles.selectionHeader}>
-            <Text numberOfLines={1} style={editorStyles.selectionTitle}>{selected ? selected.cropName : 'No plant selected'}</Text>
-            {selected ? <Text style={editorStyles.selectionHint}>Drag label to move</Text> : null}
+            <View style={editorStyles.selectionCopy}>
+              <Text numberOfLines={1} style={editorStyles.selectionTitle}>{selected ? selected.cropName : 'No plant selected'}</Text>
+              {selected ? <Text style={editorStyles.selectionHint}>Drag its label to reposition it</Text> : null}
+            </View>
+            {selected ? (
+              <Pressable accessibilityLabel={`Edit details for ${selected.cropName}`} onPress={openSelectedDetails} style={editorStyles.detailsButton}>
+                <MaterialCommunityIcons name="pencil-outline" size={16} color="#000000" />
+                <Text style={editorStyles.detailsButtonText}>Edit details</Text>
+              </Pressable>
+            ) : null}
           </View>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={editorStyles.labelStrip}>
             {rows.map((row) => (
@@ -516,31 +476,8 @@ export function FullScreenBedEditor({ visible, photoUri, rows, onRowsChange, onE
             </View>
           </KeyboardAvoidingView>
         ) : null}
-      </GestureHandlerRootView>
+      </View>
     </Modal>
-  );
-}
-
-function PhotoLabel({ row, selected, scale, size, imageSize }: {
-  row: PlantedRow;
-  selected: boolean;
-  scale: number;
-  size: Size;
-  imageSize: Size;
-}) {
-  const start = row.labelPosition ?? row.path[0] ?? row.paths?.[0]?.[0] ?? { x: 0.5, y: 0.5 };
-  const mapped = imagePointToCanvas(start, size, imageSize);
-  return (
-    <View
-      pointerEvents="none"
-      style={[
-        editorStyles.photoLabel,
-        { left: mapped.x, top: mapped.y, backgroundColor: row.color, transform: [{ translateX: -42 }, { translateY: -18 }, { scale: 1 / scale }] },
-        selected && editorStyles.photoLabelSelected,
-      ]}
-    >
-      <Text numberOfLines={1} style={editorStyles.photoLabelText}>{row.cropName}</Text>
-    </View>
   );
 }
 
@@ -584,16 +521,16 @@ const editorStyles = StyleSheet.create({
   emptyHintTitle: { color: '#FFFFFF', fontSize: 15, fontWeight: '900' },
   emptyHintBody: { color: 'rgba(255,255,255,0.82)', fontSize: 12, marginTop: 4 },
   bottomPanel: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 14, paddingTop: 10, backgroundColor: 'rgba(0,0,0,0.82)', gap: 8, borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.16)' },
-  selectionHeader: { minHeight: 22, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  selectionHeader: { minHeight: 40, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  selectionCopy: { flex: 1 },
   selectionTitle: { flex: 1, color: '#FFFFFF', fontSize: 14, fontWeight: '900' },
   selectionHint: { color: 'rgba(255,255,255,0.62)', fontSize: 10, fontWeight: '700' },
+  detailsButton: { height: 34, borderRadius: 17, paddingHorizontal: 11, flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: '#FFFFFF' },
+  detailsButtonText: { color: '#000000', fontSize: 11, fontWeight: '900' },
   labelStrip: { gap: 8, alignItems: 'center', paddingBottom: 2 },
   labelChip: { height: 36, borderRadius: 11, justifyContent: 'center', paddingHorizontal: 12, backgroundColor: '#161616', borderWidth: 1, borderColor: 'rgba(255,255,255,0.32)' },
   labelChipText: { color: '#FFFFFF', fontSize: 12, fontWeight: '900' },
   addChip: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFFFFF' },
-  photoLabel: { position: 'absolute', minWidth: 84, maxWidth: 160, height: 36, borderRadius: 8, paddingHorizontal: 10, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.7)' },
-  photoLabelSelected: { borderWidth: 3, borderColor: '#FFFFFF' },
-  photoLabelText: { color: '#FFFFFF', fontSize: 13, fontWeight: '900', textShadowColor: 'rgba(0,0,0,0.4)', textShadowRadius: 2 },
   labelEntryWrap: { ...StyleSheet.absoluteFill, justifyContent: 'center', paddingHorizontal: 24 },
   labelEntryScrim: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.72)' },
   labelEntry: { borderRadius: 24, padding: 20, backgroundColor: '#FFFFFF', gap: 12 },

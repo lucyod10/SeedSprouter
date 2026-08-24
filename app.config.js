@@ -11,5 +11,6 @@ module.exports = ({ config }) => {
   return {
     ...config,
     icon,
+    plugins: [...(config.plugins || []), ...((config.plugins || []).includes('expo-image') ? [] : ['expo-image'])],
   };
 };

@@ -72,6 +72,7 @@ The current build intentionally needs no backend account. Photos and data remain
 - Reminders are scheduled locally on the phone.
 - Garden records use checksummed, schema-validated transactional saves. Five rotating SQLite snapshots plus independent immutable Documents snapshots are retained for recovery.
 - Photos are copied to uniquely named immutable files in the app Documents directory and verified as non-empty before their URI is committed to garden data.
+- Saved photo paths are resolved against the current iOS Documents container, so installing a new development build does not strand references on an older app-container UUID.
 - If existing data cannot be verified or recovered, the app enters protected read-only mode instead of replacing it with an empty garden.
 
 These protections cover interrupted writes, malformed JSON and accidental application-level overwrite. They cannot protect against uninstalling the app, erasing or losing the iPhone, or an operating-system storage failure. Device backup or a future encrypted cloud/export feature is still required for disaster recovery outside the app container.

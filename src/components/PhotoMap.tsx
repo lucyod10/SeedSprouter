@@ -1,130 +1,84 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Image, PanResponder, StyleSheet, Text, View } from 'react-native';
-import Svg, { Circle, G, Path, Text as SvgText } from 'react-native-svg';
-import { PlantedRow, Point } from '../types';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useEffect, useMemo, useState } from 'react';
+import { Image as NativeImage, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated from 'react-native-reanimated';
+import { resolveMediaUri } from '../services/media';
+import { PlantedRow } from '../types';
+import { BedMapOverlay, MapResizeMode, MapSize } from './BedMapOverlay';
+import { GardenImage } from './GardenImage';
+import { InteractiveMapOverlay } from './map/InteractiveMapOverlay';
+import { useMapViewport } from './map/useMapViewport';
 
 type Props = {
   uri: string;
   rows: PlantedRow[];
   height?: number;
   borderRadius?: number;
-  drawing?: boolean;
-  color?: string;
-  resizeMode?: 'cover' | 'contain';
-  onPathChange?: (path: Point[]) => void;
+  resizeMode?: MapResizeMode;
+  interactive?: boolean;
 };
 
-function imageMetrics(width: number, height: number, imageWidth: number, imageHeight: number, resizeMode: 'cover' | 'contain') {
-  const scale = resizeMode === 'cover' ? Math.max(width / imageWidth, height / imageHeight) : Math.min(width / imageWidth, height / imageHeight);
-  const drawnWidth = imageWidth * scale;
-  const drawnHeight = imageHeight * scale;
-  return { drawnWidth, drawnHeight, cropX: (drawnWidth - width) / 2, cropY: (drawnHeight - height) / 2 };
-}
-
-function mapPoint(point: Point, width: number, height: number, imageWidth: number, imageHeight: number, resizeMode: 'cover' | 'contain') {
-  const metrics = imageMetrics(width, height, imageWidth, imageHeight, resizeMode);
-  return { x: point.x * metrics.drawnWidth - metrics.cropX, y: point.y * metrics.drawnHeight - metrics.cropY };
-}
-
-function pathData(points: Point[], width: number, height: number, imageWidth: number, imageHeight: number, resizeMode: 'cover' | 'contain') {
-  if (!points.length) return '';
-  const path = points.map((point, index) => {
-    const mapped = mapPoint(point, width, height, imageWidth, imageHeight, resizeMode);
-    return `${index ? 'L' : 'M'} ${mapped.x} ${mapped.y}`;
-  }).join(' ');
-  return points.length > 2 ? `${path} Z` : path;
-}
-
-function allStrokes(row: PlantedRow) {
-  return [row.path, ...(row.paths ?? [])].filter((stroke) => stroke.length > 0);
-}
-
-export function PhotoMap({ uri, rows, height = 280, borderRadius = 24, drawing = false, color = '#F2C14E', resizeMode = 'cover', onPathChange }: Props) {
-  const [width, setWidth] = useState(1);
-  const [imageSize, setImageSize] = useState({ width: 1, height: 1 });
-  const draft = useRef<Point[]>([]);
-  const [, setRevision] = useState(0);
+export function PhotoMap({ uri, rows, height = 280, borderRadius = 24, resizeMode = 'contain', interactive = false }: Props) {
+  const [size, setSize] = useState<MapSize>({ width: 1, height });
+  const [imageSize, setImageSize] = useState<MapSize>({ width: 1, height: 1 });
+  const [imageLoadError, setImageLoadError] = useState(false);
+  const { viewport, pinchGesture, panGesture, imageStyle, zoomPercent, reset, zoomBy } = useMapViewport(size, 8);
+  const gesture = useMemo(
+    () => Gesture.Simultaneous(pinchGesture, panGesture),
+    [panGesture, pinchGesture],
+  );
 
   useEffect(() => {
-    Image.getSize(uri, (imageWidth, imageHeight) => setImageSize({ width: imageWidth, height: imageHeight }), () => setImageSize({ width: 1, height: 1 }));
+    const resolvedUri = resolveMediaUri(uri);
+    setImageLoadError(false);
+    NativeImage.getSize(
+      resolvedUri,
+      (width, imageHeight) => setImageSize({ width, height: imageHeight }),
+      () => setImageLoadError(true),
+    );
+    reset();
   }, [uri]);
-
-  const addPoint = (x: number, y: number, reset = false) => {
-    const point = {
-      x: Math.min(1, Math.max(0, x / width)),
-      y: Math.min(1, Math.max(0, y / height)),
-    };
-    draft.current = reset ? [point] : [...draft.current, point];
-    setRevision((value) => value + 1);
-    onPathChange?.(draft.current);
-  };
-
-  const responder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => drawing,
-    onMoveShouldSetPanResponder: () => drawing,
-    onPanResponderGrant: (event) => addPoint(event.nativeEvent.locationX, event.nativeEvent.locationY, true),
-    onPanResponderMove: (event) => addPoint(event.nativeEvent.locationX, event.nativeEvent.locationY),
-  }), [drawing, width, height]);
-
-  const overlayRows = drawing
-    ? [...rows, { id: 'draft', cropName: 'New row', color, path: draft.current } as PlantedRow]
-    : rows;
 
   return (
     <View
       style={[styles.frame, { height, borderRadius }]}
-      onLayout={(event) => setWidth(event.nativeEvent.layout.width)}
-      {...responder.panHandlers}
+      onLayout={(event) => setSize({ width: event.nativeEvent.layout.width, height: event.nativeEvent.layout.height })}
     >
-      <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode={resizeMode} />
-      <View style={styles.shade} pointerEvents="none" />
-      <Svg width="100%" height="100%" style={StyleSheet.absoluteFill} pointerEvents="none">
-        {overlayRows.map((row) => {
-          const strokes = allStrokes(row);
-          const anchor = row.labelPosition ?? strokes[0]?.[0];
-          if (!anchor) return null;
-          const mappedAnchor = mapPoint(anchor, width, height, imageSize.width, imageSize.height, resizeMode);
-          return (
-              <G key={row.id}>
-                {strokes.map((stroke, index) => stroke.length > 1 ? (
-                  <G key={`${row.id}-stroke-${index}`}>
-                    <Path
-                      d={pathData(stroke, width, height, imageSize.width, imageSize.height, resizeMode)}
-                      stroke="rgba(0, 0, 0, 0.62)"
-                      strokeWidth={9}
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      fill="none"
-                    />
-                    <Path
-                      d={pathData(stroke, width, height, imageSize.width, imageSize.height, resizeMode)}
-                      stroke={row.color}
-                      strokeWidth={5}
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      fill="none"
-                    />
-                  </G>
-                ) : null)}
-                <Circle cx={mappedAnchor.x} cy={mappedAnchor.y} r={12} fill={row.color} />
-                <SvgText
-                  x={mappedAnchor.x + 17}
-                  y={mappedAnchor.y + 5}
-                  fill="#FFFFFF"
-                  stroke="#183226"
-                  strokeWidth={3}
-                  fontSize={14}
-                  fontWeight="700"
-                >
-                  {row.cropName}
-                </SvgText>
-              </G>
-          );
-        })}
-      </Svg>
-      {drawing && draft.current.length < 2 ? (
-        <View style={styles.hint} pointerEvents="none">
-          <Text style={styles.hintText}>Drag your finger along the planted row</Text>
+      <Animated.View style={[StyleSheet.absoluteFill, imageStyle]}>
+        <GardenImage
+          uri={uri}
+          style={StyleSheet.absoluteFill}
+          resizeMode={resizeMode}
+          highQuality={interactive}
+          onLoad={(event) => {
+            if (event.source.width > 0 && event.source.height > 0) setImageSize({ width: event.source.width, height: event.source.height });
+            setImageLoadError(false);
+          }}
+          onError={() => setImageLoadError(true)}
+        />
+      </Animated.View>
+
+      {interactive ? (
+        <InteractiveMapOverlay rows={rows} size={size} imageSize={imageSize} resizeMode={resizeMode} viewport={viewport} />
+      ) : (
+        <BedMapOverlay rows={rows} size={size} imageSize={imageSize} resizeMode={resizeMode} />
+      )}
+
+      {interactive ? <GestureDetector gesture={gesture}><Animated.View style={StyleSheet.absoluteFill} /></GestureDetector> : null}
+
+      {imageLoadError ? (
+        <View pointerEvents="none" style={styles.errorMessage}>
+          <MaterialCommunityIcons name="image-off-outline" size={25} color="#FFFFFF" />
+          <Text style={styles.errorText}>Photo could not be opened</Text>
+        </View>
+      ) : null}
+
+      {interactive ? (
+        <View style={styles.zoomRail}>
+          <Pressable accessibilityLabel="Zoom in" onPress={() => zoomBy(1.5)} style={styles.zoomButton}><MaterialCommunityIcons name="plus" size={22} color="#FFFFFF" /></Pressable>
+          <Pressable accessibilityLabel="Reset zoom" onPress={reset} style={styles.zoomPercent}><Text style={styles.zoomText}>{zoomPercent}%</Text></Pressable>
+          <Pressable accessibilityLabel="Zoom out" onPress={() => zoomBy(1 / 1.5)} style={styles.zoomButton}><MaterialCommunityIcons name="minus" size={22} color="#FFFFFF" /></Pressable>
         </View>
       ) : null}
     </View>
@@ -132,29 +86,11 @@ export function PhotoMap({ uri, rows, height = 280, borderRadius = 24, drawing =
 }
 
 const styles = StyleSheet.create({
-  frame: {
-    width: '100%',
-    overflow: 'hidden',
-    backgroundColor: '#000000',
-  },
-  shade: {
-    ...StyleSheet.absoluteFill,
-    backgroundColor: 'rgba(0, 0, 0, 0.04)',
-  },
-  hint: {
-    position: 'absolute',
-    left: 20,
-    right: 20,
-    bottom: 18,
-    alignItems: 'center',
-  },
-  hintText: {
-    color: '#FFFFFF',
-    backgroundColor: 'rgba(0, 0, 0, 0.84)',
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    borderRadius: 18,
-    fontWeight: '700',
-    overflow: 'hidden',
-  },
+  frame: { width: '100%', overflow: 'hidden', backgroundColor: '#000000' },
+  errorMessage: { position: 'absolute', alignSelf: 'center', top: '45%', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 16, backgroundColor: 'rgba(0,0,0,0.72)' },
+  errorText: { color: '#FFFFFF', fontSize: 12, fontWeight: '800' },
+  zoomRail: { position: 'absolute', right: 14, top: '42%', alignItems: 'center', overflow: 'hidden', borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.72)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.24)' },
+  zoomButton: { width: 42, height: 42, alignItems: 'center', justifyContent: 'center' },
+  zoomPercent: { minWidth: 42, minHeight: 34, paddingHorizontal: 5, alignItems: 'center', justifyContent: 'center', borderTopWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.25)' },
+  zoomText: { color: '#FFFFFF', fontSize: 10, fontWeight: '900' },
 });

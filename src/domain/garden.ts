@@ -1,12 +1,12 @@
-import { AppData, BedCycle, BedReminderSchedule, GardenBed, PlantedRow } from '../types';
+import { AppData, BedCareEvent, BedCycle, BedReminderSchedule, GardenBed, PlantedRow } from '../types';
 
 /**
  * Current logical data-model version. The storage envelope has its own version;
  * keeping these separate lets storage mechanics and garden entities evolve safely.
  */
-export const GARDEN_SCHEMA_VERSION = 3;
+export const GARDEN_SCHEMA_VERSION = 4;
 
-export function createEntityId(kind: 'bed' | 'cycle' | 'photo' | 'row') {
+export function createEntityId(kind: 'bed' | 'cycle' | 'photo' | 'row' | 'care') {
   return `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
@@ -63,6 +63,7 @@ export function createGardenBed(input: {
       weekdays: [...input.reminders.weekdays],
       times: [...input.reminders.times],
     },
+    careEvents: [],
     cycles: [createPlantingCycle(input.photoUri, now)],
   };
 }
@@ -82,6 +83,16 @@ export function addGardenBed(data: AppData, bed: GardenBed): AppData {
     schemaVersion: GARDEN_SCHEMA_VERSION,
     beds: [bed, ...data.beds],
   };
+}
+
+export function recordWateringCompleted(data: AppData, bedId: string, scheduledFor?: string, completedAt = new Date().toISOString()) {
+  const event: BedCareEvent = {
+    id: createEntityId('care'),
+    type: 'watering-completed',
+    completedAt,
+    scheduledFor,
+  };
+  return updateGardenBed(data, bedId, (bed) => ({ ...bed, careEvents: [...(bed.careEvents ?? []), event] }));
 }
 
 export function updatePlantingCycle(

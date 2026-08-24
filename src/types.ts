@@ -58,6 +58,14 @@ export type BedReminderSchedule = {
   times: string[];
 };
 
+export type BedCareEvent = {
+  id: string;
+  type: 'watering-completed';
+  completedAt: string;
+  /** The reminder occurrence this check-off satisfied, when one was overdue. */
+  scheduledFor?: string;
+};
+
 export type BedCycle = {
   id: string;
   startedAt: string;
@@ -77,6 +85,8 @@ export type GardenBed = {
   /** Recoverable soft deletion. Cycles, maps and photos remain in protected storage. */
   deletedAt?: string;
   reminders?: BedReminderSchedule;
+  /** Append-only care history. Optional so every previously saved bed remains valid. */
+  careEvents?: BedCareEvent[];
   cycles: BedCycle[];
 };
 

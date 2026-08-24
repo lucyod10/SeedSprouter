@@ -18,10 +18,11 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { PhotoMap } from './src/components/PhotoMap';
 import { FullScreenBedEditor } from './src/components/FullScreenBedEditor';
+import { GardenImage } from './src/components/GardenImage';
 import { GardenIcon, GardenIconName } from './src/components/GardenIcon';
 import { ProgressCamera } from './src/components/ProgressCamera';
 import { IconButton, palette, PrimaryButton, ProgressRing, SectionTitle } from './src/components/Ui';
@@ -32,6 +33,7 @@ import {
   createEntityId,
   createGardenBed,
   createPlantingCycle,
+  recordWateringCompleted,
   snapshotRows,
   softDeleteGardenBed,
   updateGardenBed,
@@ -49,6 +51,7 @@ import {
   wateringAdvice,
   weatherIcon,
 } from './src/lib/dates';
+import { bedReminderState, overdueLabel, type BedReminderState } from './src/lib/reminderStatus';
 import { choosePhoto, takePhoto } from './src/services/media';
 import { rebuildReminders, requestReminderPermission } from './src/services/reminders';
 import { DEFAULT_BED_REMINDERS, EMPTY_DATA, GardenDataUnavailableError, loadData, saveData } from './src/services/storage';
@@ -373,6 +376,11 @@ function AppContent() {
     setReminderOpen(false);
   };
 
+  const markBedWatered = async (bedId: string, scheduledFor?: string) => {
+    const next = recordWateringCompleted(data, bedId, scheduledFor);
+    if (await updateData(next)) Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  };
+
   if (!ready) {
     return <View style={styles.loading}><Image source={brandAssets.primaryMark} resizeMode="contain" style={styles.loadingBrandMark} /><Text style={styles.brand}>Seed Sprouter</Text></View>;
   }
@@ -471,6 +479,7 @@ function AppContent() {
             onRefresh={refreshWeather}
             onAddBed={() => setAddBedOpen(true)}
             onOpenBed={setSelectedBedId}
+            onMarkWatered={markBedWatered}
           />
         ) : tab === 'beds' ? (
           <BedsScreen beds={visibleBeds(data)} onAdd={() => setAddBedOpen(true)} onOpen={setSelectedBedId} />
@@ -495,19 +504,22 @@ function AppContent() {
 
 }
 
-function TodayScreen({ data, weather, refreshing, onRefresh, onAddBed, onOpenBed }: {
+function TodayScreen({ data, weather, refreshing, onRefresh, onAddBed, onOpenBed, onMarkWatered }: {
   data: AppData;
   weather: WeatherDay[];
   refreshing: boolean;
   onRefresh: () => void;
   onAddBed: () => void;
   onOpenBed: (id: string) => void;
+  onMarkWatered: (bedId: string, scheduledFor?: string) => void;
 }) {
   const bedSummaries = visibleBeds(data).map((bed) => ({ bed, cycle: activeCycle(bed) ?? bed.cycles[bed.cycles.length - 1], active: Boolean(activeCycle(bed)) }));
   const activeBeds = bedSummaries.filter((item) => item.active);
   const activeRows = activeBeds.flatMap(({ bed, cycle }) => cycle.rows.map((row) => ({ bed, row })));
   const today = weather[0];
   const reminderBeds = activeBeds.filter(({ bed }) => bed.reminders?.enabled);
+  const reminderStates = new Map(activeBeds.map(({ bed }) => [bed.id, bedReminderState(bed)]));
+  const overdueBeds = reminderBeds.filter(({ bed }) => reminderStates.get(bed.id)?.kind === 'overdue');
   const harvestSoon = activeRows.filter(({ row }) => daysSince(row.plantedAt) >= row.harvestDays[0] - 7);
   return (
     <ScrollView
@@ -516,19 +528,23 @@ function TodayScreen({ data, weather, refreshing, onRefresh, onAddBed, onOpenBed
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={palette.leaf} />}
     >
       <View style={styles.todayHeader}>
-        <View><Text style={styles.eyebrow}>SEED SPROUTER · NEWCASTLE</Text><Text style={styles.todayTitle}>Today</Text><Text style={styles.todayDate}>{longDate(new Date().toISOString())}</Text></View>
+        <View><Text style={styles.eyebrow}>SEED SPROUTER</Text><Text style={styles.todayTitle}>Today</Text><Text style={styles.todayDate}>{longDate(new Date().toISOString())}</Text></View>
         <Image source={brandAssets.compactMark} resizeMode="contain" style={styles.todayBrandMark} />
       </View>
 
-      <View style={styles.todayWeather}>
+      <View style={styles.weatherCard}>
+        <View style={styles.weatherLocation}><MaterialCommunityIcons name="map-marker-outline" size={16} color="#000000" /><Text style={styles.weatherLocationText}>NEWCASTLE, NSW</Text></View>
+        <View style={styles.todayWeather}>
         <Text style={styles.todayWeatherEmoji}>{today ? weatherIcon(today.weatherCode) : '🌤️'}</Text>
         <View style={styles.flex}><Text style={styles.todayWeatherTemp}>{today ? `${today.max}°` : 'Weather offline'}</Text><Text numberOfLines={1} style={styles.todayWeatherMeta}>{today ? `${today.min}° low · ${today.rainChance}% rain` : 'Pull down to refresh'}</Text></View>
         {today ? <ProgressRing progress={today.rainChance / 100} icon="water-outline" color="#00B7FF" size={46} strokeWidth={4} /> : null}
+        </View>
+        <View style={styles.weatherDivider} />
+        <Text numberOfLines={2} style={styles.todayWeatherAdvice}>{weatherWaterNote(today)}</Text>
       </View>
-      <Text numberOfLines={2} style={styles.todayWeatherAdvice}>{weatherWaterNote(today)}</Text>
 
       <View style={styles.todayMetrics}>
-        <TodayMetric icon="water" color="#00DFA2" value={String(reminderBeds.length)} label={reminderBeds.length === 1 ? 'bed scheduled' : 'beds scheduled'} />
+        <TodayMetric icon="water" color={overdueBeds.length ? '#FF5D73' : '#00DFA2'} value={String(overdueBeds.length || reminderBeds.length)} label={overdueBeds.length ? 'watering overdue' : reminderBeds.length === 1 ? 'bed scheduled' : 'beds scheduled'} />
         <View style={styles.todayMetricDivider} />
         <TodayMetric icon="harvest" color="#FFD400" value={String(harvestSoon.length)} label="near harvest" />
       </View>
@@ -538,7 +554,7 @@ function TodayScreen({ data, weather, refreshing, onRefresh, onAddBed, onOpenBed
         <Pressable accessibilityLabel="Add garden bed" onPress={onAddBed} style={styles.todaySectionAdd}><GardenIcon name="add" size={21} color="#FFFFFF" /></Pressable>
       </View>
       {bedSummaries.length ? bedSummaries.map(({ bed, cycle, active }) => (
-        <TodayBedCard key={bed.id} bed={bed} cycle={cycle} active={active} onPress={() => onOpenBed(bed.id)} />
+        <TodayBedCard key={bed.id} bed={bed} cycle={cycle} active={active} reminderState={reminderStates.get(bed.id)} onPress={() => onOpenBed(bed.id)} onMarkWatered={(scheduledFor) => onMarkWatered(bed.id, scheduledFor)} />
       )) : (
         <EmptyCard title="Your garden starts with a photo" body="Add a bed, then trace each planted row with your finger." action="Add my first bed" onPress={onAddBed} />
       )}
@@ -550,25 +566,59 @@ function TodayMetric({ icon, color, value, label }: { icon: GardenIconName; colo
   return <View style={styles.todayMetric}><View style={[styles.todayMetricRing, { borderColor: color }]}><GardenIcon name={icon} size={20} color="#000000" /></View><View><Text style={styles.todayMetricValue}>{value}</Text><Text style={styles.todayMetricLabel}>{label}</Text></View></View>;
 }
 
-function TodayBedCard({ bed, cycle, active, onPress }: { bed: GardenBed; cycle: BedCycle; active: boolean; onPress: () => void }) {
+function TodayBedCard({ bed, cycle, active, reminderState, onPress, onMarkWatered }: {
+  bed: GardenBed;
+  cycle: BedCycle;
+  active: boolean;
+  reminderState?: BedReminderState;
+  onPress: () => void;
+  onMarkWatered: (scheduledFor?: string) => void;
+}) {
   const latest = cycle.progress[0];
   const updateDays = daysSince(latest?.takenAt ?? cycle.startedAt);
   const updateText = updateDays <= 0 ? 'Updated today' : updateDays === 1 ? 'Updated yesterday' : `Updated ${updateDays} days ago`;
   const averageProgress = cycle.rows.length ? cycle.rows.reduce((total, row) => total + Math.min(1, daysSince(row.plantedAt) / row.harvestDays[1]), 0) / cycle.rows.length : 0;
   const plantNames = cycle.rows.slice(0, 3).map((row) => row.cropName).join(' · ');
+  const firstHarvest = cycle.rows.length ? Math.min(...cycle.rows.map((row) => row.harvestDays[0] - daysSince(row.plantedAt))) : undefined;
+  const harvestText = firstHarvest === undefined ? 'No harvest estimate' : firstHarvest <= 0 ? 'Harvest window open' : `${firstHarvest}d to first harvest`;
+  const hasReminder = active && bed.reminders?.enabled && reminderState && reminderState.kind !== 'off';
+  const reminderTime = reminderState?.nextDue
+    ? formatReminderTime(`${String(reminderState.nextDue.getHours()).padStart(2, '0')}:${String(reminderState.nextDue.getMinutes()).padStart(2, '0')}`)
+    : undefined;
+  const reminderTitle = reminderState?.kind === 'overdue'
+    ? 'Water overdue'
+    : reminderState?.kind === 'complete'
+      ? 'Watered'
+      : 'Water scheduled';
+  const reminderDetail = reminderState?.kind === 'overdue' && reminderState.latestDue
+    ? `${overdueLabel(reminderState.latestDue)} · tap to mark done`
+    : reminderTime ? `Next ${reminderTime}` : 'Reminder is on';
   return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.todayBedCard, pressed && styles.cardPressed]}>
-      <Image source={{ uri: cycle.coverPhotoUri }} style={styles.todayBedImage} />
-      <View style={styles.todayBedShade} />
-      <View style={styles.todayBedTop}>
-        <View style={styles.todayBedStatus}><View style={[styles.todayBedStatusDot, { backgroundColor: active ? '#00DFA2' : '#FFFFFF' }]} /><Text style={styles.todayBedStatusText}>{active ? 'Growing' : 'Harvested'}</Text></View>
-        <Text style={styles.todayBedUpdated}>{updateText}</Text>
+    <View style={styles.todayBedCard}>
+      <Pressable accessibilityLabel={`Open ${bed.name}`} onPress={onPress} style={({ pressed }) => [styles.todayBedPhoto, pressed && styles.cardPressed]}>
+        <PhotoMap uri={cycle.coverPhotoUri} rows={cycle.rows} height={218} borderRadius={18} resizeMode="contain" />
+        <View pointerEvents="none" style={styles.todayBedPhotoStatus}><View style={[styles.todayBedStatusDot, { backgroundColor: active ? '#00DFA2' : '#B6B6B6' }]} /><Text style={styles.todayBedPhotoStatusText}>{active ? 'Growing' : 'Harvested'}</Text></View>
+      </Pressable>
+      <View style={styles.todayBedInfo}>
+        <Pressable accessibilityLabel={`Open details for ${bed.name}`} onPress={onPress} style={({ pressed }) => [styles.todayBedInfoMain, pressed && { opacity: 0.65 }]}>
+          <View style={styles.todayBedNameRow}><Text numberOfLines={2} style={styles.todayBedName}>{bed.name}</Text><MaterialCommunityIcons name="chevron-right" size={22} color={palette.muted} /></View>
+          <Text numberOfLines={2} style={styles.todayBedPlants}>{plantNames || 'Ready to map'}</Text>
+          <View style={styles.todayBedGlanceRow}><MaterialCommunityIcons name="image-multiple-outline" size={15} color="#000000" /><Text style={styles.todayBedGlanceText}>{updateText}</Text></View>
+          <View style={styles.todayBedGlanceRow}><MaterialCommunityIcons name="basket-outline" size={15} color="#000000" /><Text numberOfLines={1} style={styles.todayBedGlanceText}>{harvestText}</Text></View>
+          <View style={styles.todayBedProgressRow}><ProgressRing progress={averageProgress} icon="sprout-outline" color="#7B61FF" size={38} strokeWidth={3} /><Text style={styles.todayBedProgressText}>{cycle.rows.length} plant{cycle.rows.length === 1 ? '' : 's'} · {cycle.progress.length} photo{cycle.progress.length === 1 ? '' : 's'}</Text></View>
+        </Pressable>
+        {hasReminder ? (
+          <Pressable
+            accessibilityLabel={reminderState.kind === 'overdue' ? `Mark ${bed.name} watered` : `Open ${bed.name} reminder`}
+            onPress={reminderState.kind === 'overdue' ? () => onMarkWatered(reminderState.latestDue?.toISOString()) : onPress}
+            style={({ pressed }) => [styles.todayBedAlarm, reminderState.kind === 'overdue' ? styles.todayBedAlarmOverdue : reminderState.kind === 'complete' ? styles.todayBedAlarmComplete : styles.todayBedAlarmUpcoming, pressed && { opacity: 0.68 }]}
+          >
+            <View style={styles.todayBedAlarmIcon}><MaterialCommunityIcons name={reminderState.kind === 'overdue' ? 'alarm-light-outline' : reminderState.kind === 'complete' ? 'check' : 'alarm'} size={18} color="#000000" /></View>
+            <View style={styles.flex}><Text style={styles.todayBedAlarmTitle}>{reminderTitle}</Text><Text numberOfLines={1} style={styles.todayBedAlarmDetail}>{reminderDetail}</Text></View>
+          </Pressable>
+        ) : null}
       </View>
-      <View style={styles.todayBedBottom}>
-        <View style={styles.todayBedCopy}><Text style={styles.todayBedName}>{bed.name}</Text><Text numberOfLines={1} style={styles.todayBedPlants}>{plantNames || 'Ready to map'}</Text><View style={styles.todayBedDetails}><Text style={styles.todayBedDetail}>{cycle.rows.length} plant{cycle.rows.length === 1 ? '' : 's'}</Text><Text style={styles.todayBedDot}>•</Text><Text style={styles.todayBedDetail}>{cycle.progress.length} photo{cycle.progress.length === 1 ? '' : 's'}</Text></View></View>
-        <ProgressRing progress={averageProgress} icon="sprout-outline" color="#E9FFB7" iconColor="#FFFFFF" size={50} strokeWidth={4} trackColor="rgba(255,255,255,0.28)" />
-      </View>
-    </Pressable>
+    </View>
   );
 }
 
@@ -581,7 +631,7 @@ function BedsScreen({ beds, onAdd, onOpen }: { beds: GardenBed[]; onAdd: () => v
         const isActive = Boolean(activeCycle(bed));
         return (
           <Pressable key={bed.id} onPress={() => onOpen(bed.id)} style={({ pressed }) => [styles.bedCard, pressed && styles.cardPressed]}>
-            <Image source={{ uri: cycle.coverPhotoUri }} style={styles.bedCardImage} />
+            <PhotoMap uri={cycle.coverPhotoUri} rows={cycle.rows} height={205} borderRadius={16} resizeMode="contain" />
             <View style={styles.bedOverlay} />
             <View style={styles.bedStatus}><View style={[styles.statusDot, !isActive && { backgroundColor: '#B1B4AD' }]} /><Text style={styles.bedStatusText}>{isActive ? 'Growing' : 'Harvested'}</Text></View>
             <View style={styles.bedCardText}><Text style={styles.bedCardTitle}>{bed.name}</Text><Text style={styles.bedCardMeta}>{cycle.rows.length} row{cycle.rows.length === 1 ? '' : 's'} · cycle {bed.cycles.length}</Text></View>
@@ -624,7 +674,16 @@ function BedScreen({ bed, cycle, onBack, onEditMap, onProgress, onReminders, onM
   onRestart: () => void;
   onViewProgress: (cycleId: string, photo: ProgressPhoto) => void;
 }) {
+  const [inspectingMap, setInspectingMap] = useState(false);
   const shownCycle = cycle ?? bed.cycles[bed.cycles.length - 1];
+  const mainPhoto: ProgressPhoto = {
+    id: `main-${shownCycle.id}`,
+    uri: shownCycle.coverPhotoUri,
+    takenAt: shownCycle.startedAt,
+    note: `${bed.name} planting map`,
+    kind: 'original',
+    rowsSnapshot: shownCycle.rows,
+  };
   const timelinePhotos: ProgressPhoto[] = shownCycle.progress.length ? shownCycle.progress : [{
     id: `cover-${shownCycle.id}`,
     uri: shownCycle.coverPhotoUri,
@@ -637,7 +696,10 @@ function BedScreen({ bed, cycle, onBack, onEditMap, onProgress, onReminders, onM
     <SafeAreaView style={styles.app} edges={['top']}>
       <ScrollView style={styles.flex} contentContainerStyle={styles.bedDetailContent}>
         <View style={styles.detailHeader}><IconButton icon="arrow-left" label="Back" onPress={onBack} /><View style={styles.detailTitleWrap}><Text style={styles.detailTitle}>{bed.name}</Text><Text style={styles.cardMeta}>{bed.location} · cycle {bed.cycles.length}</Text></View><IconButton icon="dots-horizontal" label="Bed actions" onPress={onMenu} /></View>
-        <PhotoMap uri={shownCycle.coverPhotoUri} rows={shownCycle.rows} height={300} borderRadius={14} />
+        <Pressable accessibilityLabel="Open garden map full screen" onPress={() => setInspectingMap(true)} style={({ pressed }) => [styles.mapPreview, pressed && styles.cardPressed]}>
+          <PhotoMap uri={shownCycle.coverPhotoUri} rows={shownCycle.rows} height={300} borderRadius={14} resizeMode="contain" />
+          <View pointerEvents="none" style={styles.inspectPill}><MaterialCommunityIcons name="arrow-expand" size={16} color="#FFFFFF" /><Text style={styles.inspectPillText}>Inspect</Text></View>
+        </Pressable>
         {cycle ? (
           <>
             <View style={styles.quickActions}>
@@ -654,7 +716,7 @@ function BedScreen({ bed, cycle, onBack, onEditMap, onProgress, onReminders, onM
             <SectionTitle title="Progress timeline" />
             {timelinePhotos.map((photo) => (
               <Pressable key={photo.id} accessibilityLabel={`View photo from ${shortDate(photo.takenAt)}`} onPress={() => onViewProgress(shownCycle.id, photo)} style={({ pressed }) => [styles.progressCard, pressed && styles.cardPressed]}>
-                <Image source={{ uri: photo.uri }} style={styles.progressImage} />
+                <GardenImage uri={photo.uri} style={styles.progressImage} />
                 <View style={styles.progressText}><View style={styles.progressTitleRow}><Text style={styles.cardTitle}>{shortDate(photo.takenAt)}</Text>{photo.uri === shownCycle.coverPhotoUri ? <Text style={styles.mainPhotoPill}>MAIN</Text> : null}</View><Text style={styles.cardMeta}>{photo.note || `Day ${daysSince(shownCycle.startedAt, new Date(photo.takenAt)) + 1}`}</Text><Text style={styles.tapPhotoHint}>Tap to view map</Text></View>
                 <MaterialCommunityIcons name="chevron-right" size={22} color={palette.muted} />
               </Pressable>
@@ -668,24 +730,26 @@ function BedScreen({ bed, cycle, onBack, onEditMap, onProgress, onReminders, onM
           <View style={styles.historyBlock}><SectionTitle title="Previous cycles" />{[...bed.cycles].reverse().map((past, index) => <Text key={past.id} style={styles.historyLine}>Cycle {bed.cycles.length - index} · {longDate(past.startedAt)} · {past.rows.length} rows</Text>)}</View>
         ) : null}
       </ScrollView>
+      <ProgressPhotoViewer visible={inspectingMap} photo={mainPhoto} cycle={shownCycle} onClose={() => setInspectingMap(false)} onUseAsMain={() => {}} inspectionOnly />
       <StatusBar style="dark" />
     </SafeAreaView>
   );
 }
 
-function ProgressPhotoViewer({ visible, photo, cycle, onClose, onUseAsMain }: {
+function ProgressPhotoViewer({ visible, photo, cycle, onClose, onUseAsMain, inspectionOnly }: {
   visible: boolean;
   photo?: ProgressPhoto;
   cycle?: BedCycle;
   onClose: () => void;
   onUseAsMain: () => void;
+  inspectionOnly?: boolean;
 }) {
   const [viewerHeight, setViewerHeight] = useState(1);
   const isMain = Boolean(photo && cycle && photo.uri === cycle.coverPhotoUri);
   return (
-    <Modal visible={visible} animationType="fade" presentationStyle="fullScreen" onRequestClose={onClose}>
+    <Modal visible={visible} animationType="none" presentationStyle="fullScreen" onRequestClose={onClose}>
       <View style={styles.photoViewer} onLayout={(event) => setViewerHeight(event.nativeEvent.layout.height)}>
-        {photo && cycle ? <PhotoMap uri={photo.uri} rows={photo.rowsSnapshot ?? cycle.rows} height={viewerHeight} borderRadius={0} resizeMode="contain" /> : null}
+        {photo && cycle ? <PhotoMap uri={photo.uri} rows={photo.rowsSnapshot ?? cycle.rows} height={viewerHeight} borderRadius={0} resizeMode="contain" interactive /> : null}
         <SafeAreaView edges={['top']} style={styles.photoViewerTop} pointerEvents="box-none">
           <Pressable accessibilityLabel="Close photo" onPress={onClose} style={styles.photoViewerClose}><MaterialCommunityIcons name="close" size={25} color="#FFFFFF" /></Pressable>
           <View style={styles.photoViewerTitlePill}><MaterialCommunityIcons name="map-marker-path" size={17} color="#FFFFFF" /><Text style={styles.photoViewerTitle}>Saved map</Text></View>
@@ -698,7 +762,7 @@ function ProgressPhotoViewer({ visible, photo, cycle, onClose, onUseAsMain }: {
               <Text style={styles.photoViewerNote}>{photo.note || `Day ${daysSince(cycle.startedAt, new Date(photo.takenAt)) + 1}`}</Text>
               <Text style={styles.photoViewerMapNote}>{(photo.rowsSnapshot ?? cycle.rows).length} mapped plant labels shown</Text>
             </View>
-            {isMain ? (
+            {inspectionOnly ? null : isMain ? (
               <View style={styles.currentMainButton}><MaterialCommunityIcons name="check-circle" size={20} color="#000000" /><Text style={styles.currentMainText}>Current main photo</Text></View>
             ) : (
               <Pressable onPress={onUseAsMain} style={styles.restoreMainButton}><MaterialCommunityIcons name="image-sync-outline" size={20} color="#000000" /><Text style={styles.restoreMainText}>Make main photo</Text></Pressable>
@@ -725,8 +789,8 @@ function RowCard({ row }: { row: PlantedRow }) {
       <View style={styles.rowAdvice}><MaterialCommunityIcons name="water-outline" size={20} color={palette.leaf} /><Text style={styles.rowAdviceText}>{wateringAdvice(row, guide)}</Text></View>
       {(row.packetFrontPhotoUri || row.packetBackPhotoUri || row.packetPhotoUri) ? (
         <View style={styles.packetThumbs}>
-          {(row.packetFrontPhotoUri || row.packetPhotoUri) ? <View><Image source={{ uri: row.packetFrontPhotoUri || row.packetPhotoUri }} style={styles.packetThumb} /><Text style={styles.packetCaption}>FRONT</Text></View> : null}
-          {row.packetBackPhotoUri ? <View><Image source={{ uri: row.packetBackPhotoUri }} style={styles.packetThumb} /><Text style={styles.packetCaption}>BACK</Text></View> : null}
+          {(row.packetFrontPhotoUri || row.packetPhotoUri) ? <View><GardenImage uri={(row.packetFrontPhotoUri || row.packetPhotoUri)!} style={styles.packetThumb} /><Text style={styles.packetCaption}>FRONT</Text></View> : null}
+          {row.packetBackPhotoUri ? <View><GardenImage uri={row.packetBackPhotoUri} style={styles.packetThumb} /><Text style={styles.packetCaption}>BACK</Text></View> : null}
         </View>
       ) : null}
       {row.notes ? <Text style={styles.rowNotes}>{row.notes}</Text> : null}
@@ -739,7 +803,7 @@ function AddBedModal({ visible, name, photo, onName, onPhoto, onClose, onSave }:
     <Sheet visible={visible} title="Add a garden bed" onClose={onClose}>
       <Text style={styles.inputLabel}>BED NAME</Text><TextInput value={name} onChangeText={onName} placeholder="e.g. Back fence bed" placeholderTextColor="#98A099" style={styles.input} autoFocus />
       <Text style={styles.inputLabel}>STARTING PHOTO</Text>
-      {photo ? <Image source={{ uri: photo }} style={styles.formPhoto} /> : <View style={styles.photoPlaceholder}><MaterialCommunityIcons name="image-outline" size={38} color={palette.muted} /><Text style={styles.cardMeta}>Photograph the whole bed from above if you can</Text></View>}
+      {photo ? <GardenImage uri={photo} style={styles.formPhoto} /> : <View style={styles.photoPlaceholder}><MaterialCommunityIcons name="image-outline" size={38} color={palette.muted} /><Text style={styles.cardMeta}>Photograph the whole bed from above if you can</Text></View>}
       <View style={styles.twoButtons}><View style={styles.flex}><PrimaryButton label="Take photo" icon="camera-outline" tone="cream" onPress={() => onPhoto('camera')} /></View><View style={styles.flex}><PrimaryButton label="Choose photo" icon="image-outline" tone="cream" onPress={() => onPhoto('library')} /></View></View>
       <PrimaryButton label="Create garden bed" icon="sprout" disabled={!name.trim() || !photo} onPress={onSave} />
     </Sheet>
@@ -776,6 +840,22 @@ function RowModal({ visible, plantName, plantedAt, notes, packetFrontPhoto, pack
         <View><Text style={styles.timelineLabel}>ESTIMATED GERMINATION</Text><Text style={styles.timelineValue}>{validDate ? dateRange(`${plantedAt}T12:00:00`, guide?.germinationDays ?? [5, 14]) : '—'}</Text></View>
         <View><Text style={styles.timelineLabel}>ESTIMATED HARVEST</Text><Text style={styles.timelineValue}>{validDate ? dateRange(`${plantedAt}T12:00:00`, guide?.harvestDays ?? [45, 90]) : '—'}</Text></View>
       </View>
+      {guide ? (
+        <View style={styles.plantGuideCard}>
+          <View style={styles.plantGuideHeading}>
+            <MaterialCommunityIcons name="sprout-outline" size={21} color="#000000" />
+            <View style={styles.flex}><Text style={styles.plantGuideTitle}>Auto-filled growing guide</Text><Text style={styles.plantGuideSource}>{guide.name} · Newcastle estimates</Text></View>
+          </View>
+          <View style={styles.plantGuideMetrics}>
+            <View style={styles.plantGuideMetric}><Text style={styles.timelineLabel}>GERMINATION</Text><Text style={styles.timelineValue}>{guide.germinationDays[0]}–{guide.germinationDays[1]} days</Text></View>
+            <View style={styles.plantGuideMetric}><Text style={styles.timelineLabel}>HARVEST</Text><Text style={styles.timelineValue}>{guide.harvestDays[0]}–{guide.harvestDays[1]} days</Text></View>
+            <View style={styles.plantGuideMetric}><Text style={styles.timelineLabel}>SPACING</Text><Text style={styles.timelineValue}>{guide.spacingCm} cm</Text></View>
+            <View style={styles.plantGuideMetric}><Text style={styles.timelineLabel}>LIGHT</Text><Text style={styles.timelineValue}>{guide.sun}</Text></View>
+          </View>
+          <View style={styles.plantGuideAdvice}><MaterialCommunityIcons name="water-outline" size={18} color="#000000" /><Text style={styles.plantGuideAdviceText}>{guide.seedWater}</Text></View>
+          <Text style={styles.plantGuideTip}>{guide.tip}</Text>
+        </View>
+      ) : null}
       <Text style={styles.inputLabel}>SEED PACKET (OPTIONAL)</Text>
       <View style={styles.packetFields}>
         <PacketPhotoField side="Front" photo={packetFrontPhoto} onPhoto={onPacketFrontPhoto} />
@@ -791,7 +871,7 @@ function RowModal({ visible, plantName, plantedAt, notes, packetFrontPhoto, pack
 function PacketPhotoField({ side, photo, onPhoto }: { side: string; photo?: string; onPhoto: (source: PhotoSource) => void }) {
   return (
     <View style={styles.packetField}>
-      {photo ? <Image source={{ uri: photo }} style={styles.packetFieldImage} /> : <View style={styles.packetFieldPlaceholder}><MaterialCommunityIcons name="seed-outline" size={27} color={palette.muted} /></View>}
+      {photo ? <GardenImage uri={photo} style={styles.packetFieldImage} /> : <View style={styles.packetFieldPlaceholder}><MaterialCommunityIcons name="seed-outline" size={27} color={palette.muted} /></View>}
       <Text style={styles.packetFieldTitle}>{side}</Text>
       <View style={styles.packetFieldActions}>
         <Pressable onPress={() => onPhoto('camera')} style={styles.packetMiniButton}><MaterialCommunityIcons name="camera-outline" size={18} color={palette.ink} /></Pressable>
@@ -883,7 +963,7 @@ function PhotoNoteModal({ visible, title, photo, note, replaceBedPhoto, onReplac
 }) {
   return (
     <Sheet visible={visible} title={title} onClose={onClose}>
-      {photo ? <Image source={{ uri: photo }} style={styles.formPhoto} /> : <View style={styles.photoPlaceholder}><MaterialCommunityIcons name="camera-plus-outline" size={38} color={palette.muted} /><Text style={styles.cardMeta}>Capture the same angle to make growth easy to compare</Text></View>}
+      {photo ? <GardenImage uri={photo} style={styles.formPhoto} /> : <View style={styles.photoPlaceholder}><MaterialCommunityIcons name="camera-plus-outline" size={38} color={palette.muted} /><Text style={styles.cardMeta}>Capture the same angle to make growth easy to compare</Text></View>}
       <View style={styles.twoButtons}><View style={styles.flex}><PrimaryButton label="Take photo" icon="camera-outline" tone="cream" onPress={() => onPhoto('camera')} /></View><View style={styles.flex}><PrimaryButton label="Choose photo" icon="image-outline" tone="cream" onPress={() => onPhoto('library')} /></View></View>
       <Text style={styles.inputLabel}>WHAT CHANGED? (OPTIONAL)</Text>
       <TextInput value={note} onChangeText={onNote} placeholder="First shoots, thinned seedlings…" placeholderTextColor="#98A099" style={[styles.input, styles.notesInput]} multiline />
@@ -900,7 +980,7 @@ function RestartModal({ visible, photo, onPhoto, onClose, onSave }: { visible: b
   return (
     <Sheet visible={visible} title="Start a new cycle" onClose={onClose}>
       <Text style={styles.mutedParagraph}>Take a fresh photo after clearing and preparing the bed. The previous cycle will remain in its history.</Text>
-      {photo ? <Image source={{ uri: photo }} style={styles.formPhoto} /> : <View style={styles.photoPlaceholder}><MaterialCommunityIcons name="sprout-outline" size={38} color={palette.muted} /><Text style={styles.cardMeta}>Fresh bed, fresh planting map</Text></View>}
+      {photo ? <GardenImage uri={photo} style={styles.formPhoto} /> : <View style={styles.photoPlaceholder}><MaterialCommunityIcons name="sprout-outline" size={38} color={palette.muted} /><Text style={styles.cardMeta}>Fresh bed, fresh planting map</Text></View>}
       <View style={styles.twoButtons}><View style={styles.flex}><PrimaryButton label="Take photo" icon="camera-outline" tone="cream" onPress={() => onPhoto('camera')} /></View><View style={styles.flex}><PrimaryButton label="Choose photo" icon="image-outline" tone="cream" onPress={() => onPhoto('library')} /></View></View>
       <PrimaryButton label="Begin new cycle" icon="sprout" disabled={!photo} onPress={onSave} />
     </Sheet>
@@ -909,7 +989,7 @@ function RestartModal({ visible, photo, onPhoto, onClose, onSave }: { visible: b
 
 function Sheet({ visible, title, onClose, children }: { visible: boolean; title: string; onClose: () => void; children: React.ReactNode }) {
   return (
-    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+    <Modal visible={visible} transparent animationType="none" onRequestClose={onClose}>
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalRoot}>
         <Pressable style={styles.modalScrim} onPress={onClose} />
         <View style={styles.sheet}><View style={styles.sheetHandle} /><View style={styles.sheetHeader}><Text style={styles.sheetTitle}>{title}</Text><IconButton icon="close" label="Close" onPress={onClose} /></View><ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.sheetContent}>{children}</ScrollView></View>
@@ -957,11 +1037,15 @@ const styles = StyleSheet.create({
   todayTitle: { color: '#000000', fontSize: 38, lineHeight: 42, fontWeight: '900', letterSpacing: -1.3, marginTop: 4 },
   todayDate: { color: palette.muted, fontSize: 12, marginTop: 3 },
   todayBrandMark: { width: 54, height: 54 },
-  todayWeather: { minHeight: 68, flexDirection: 'row', alignItems: 'center', gap: 13, paddingVertical: 8 },
+  weatherCard: { padding: 15, borderRadius: 22, gap: 10, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: palette.line },
+  weatherLocation: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  weatherLocationText: { color: '#000000', fontSize: 10, lineHeight: 14, fontWeight: '900', letterSpacing: 1.1 },
+  todayWeather: { minHeight: 54, flexDirection: 'row', alignItems: 'center', gap: 13 },
   todayWeatherEmoji: { fontSize: 35 },
   todayWeatherTemp: { color: '#000000', fontSize: 25, fontWeight: '900' },
   todayWeatherMeta: { color: palette.muted, fontSize: 12, marginTop: 1 },
-  todayWeatherAdvice: { color: palette.muted, fontSize: 12, lineHeight: 17, marginTop: -8 },
+  weatherDivider: { height: 1, backgroundColor: palette.line },
+  todayWeatherAdvice: { color: palette.muted, fontSize: 12, lineHeight: 17 },
   todayMetrics: { minHeight: 72, flexDirection: 'row', alignItems: 'center', paddingVertical: 10, borderTopWidth: 1, borderBottomWidth: 1, borderColor: palette.line },
   todayMetric: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10 },
   todayMetricRing: { width: 42, height: 42, borderRadius: 21, borderWidth: 4, alignItems: 'center', justifyContent: 'center' },
@@ -973,21 +1057,27 @@ const styles = StyleSheet.create({
   todaySectionAdd: { width: 38, height: 38, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: '#000000' },
   todaySectionTitle: { color: '#000000', fontSize: 21, fontWeight: '900', letterSpacing: -0.4 },
   todaySectionCount: { minWidth: 23, height: 23, borderRadius: 12, textAlign: 'center', textAlignVertical: 'center', paddingTop: Platform.OS === 'ios' ? 4 : 1, color: '#000000', backgroundColor: '#E9FFB7', fontSize: 11, fontWeight: '900', overflow: 'hidden' },
-  todayBedCard: { height: 238, overflow: 'hidden', borderRadius: 20, backgroundColor: '#000000' },
-  todayBedImage: { ...StyleSheet.absoluteFill, width: '100%', height: '100%' },
-  todayBedShade: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0,0,0,0.3)' },
-  todayBedTop: { position: 'absolute', left: 14, right: 14, top: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  todayBedStatus: { height: 30, paddingHorizontal: 10, borderRadius: 15, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(0,0,0,0.64)' },
+  todayBedCard: { minHeight: 220, flexDirection: 'row', overflow: 'hidden', borderRadius: 20, padding: 7, gap: 12, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: palette.line },
+  todayBedPhoto: { width: '41%', height: 218, overflow: 'hidden', borderRadius: 18, backgroundColor: '#000000' },
+  todayBedPhotoStatus: { position: 'absolute', left: 9, top: 9, height: 27, paddingHorizontal: 9, borderRadius: 14, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(0,0,0,0.72)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)' },
   todayBedStatusDot: { width: 8, height: 8, borderRadius: 4 },
-  todayBedStatusText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
-  todayBedUpdated: { color: '#000000', backgroundColor: 'rgba(255,255,255,0.92)', paddingHorizontal: 10, paddingVertical: 7, borderRadius: 14, fontSize: 10, fontWeight: '900', overflow: 'hidden' },
-  todayBedBottom: { position: 'absolute', left: 17, right: 17, bottom: 16, flexDirection: 'row', alignItems: 'flex-end', gap: 12 },
-  todayBedCopy: { flex: 1 },
-  todayBedName: { color: '#FFFFFF', fontSize: 25, lineHeight: 29, fontWeight: '900', letterSpacing: -0.6 },
-  todayBedPlants: { color: 'rgba(255,255,255,0.86)', fontSize: 12, fontWeight: '700', marginTop: 4 },
-  todayBedDetails: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 8 },
-  todayBedDetail: { color: 'rgba(255,255,255,0.7)', fontSize: 10, fontWeight: '800' },
-  todayBedDot: { color: 'rgba(255,255,255,0.5)', fontSize: 10 },
+  todayBedPhotoStatusText: { color: '#FFFFFF', fontSize: 10, fontWeight: '900' },
+  todayBedInfo: { flex: 1, minWidth: 0, paddingVertical: 4, paddingRight: 3 },
+  todayBedInfoMain: { flex: 1 },
+  todayBedNameRow: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 3 },
+  todayBedName: { flex: 1, color: '#000000', fontSize: 20, lineHeight: 23, fontWeight: '900', letterSpacing: -0.45 },
+  todayBedPlants: { color: palette.muted, fontSize: 11, lineHeight: 15, fontWeight: '700', marginTop: 3, marginBottom: 9 },
+  todayBedGlanceRow: { minHeight: 24, flexDirection: 'row', alignItems: 'center', gap: 7 },
+  todayBedGlanceText: { flex: 1, color: '#000000', fontSize: 10, fontWeight: '700' },
+  todayBedProgressRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 5 },
+  todayBedProgressText: { flex: 1, color: palette.muted, fontSize: 9, lineHeight: 13, fontWeight: '800' },
+  todayBedAlarm: { minHeight: 47, flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8, paddingHorizontal: 9, paddingVertical: 7, borderRadius: 14 },
+  todayBedAlarmUpcoming: { backgroundColor: '#CDEEFF' },
+  todayBedAlarmComplete: { backgroundColor: '#BDF6D9' },
+  todayBedAlarmOverdue: { backgroundColor: '#FF9BAD', borderWidth: 1, borderColor: '#FF5D73' },
+  todayBedAlarmIcon: { width: 29, height: 29, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.72)' },
+  todayBedAlarmTitle: { color: '#000000', fontSize: 11, fontWeight: '900' },
+  todayBedAlarmDetail: { color: 'rgba(0,0,0,0.64)', fontSize: 8.5, lineHeight: 12, fontWeight: '800', marginTop: 1 },
   reminderCard: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: '#FFFFFF', padding: 15, borderRadius: 22, borderWidth: 1, borderColor: palette.line },
   reminderIcon: { width: 42, height: 42, borderRadius: 14, backgroundColor: palette.lime, alignItems: 'center', justifyContent: 'center' },
   cardTitle: { color: palette.ink, fontSize: 16, fontWeight: '800' },
@@ -1025,6 +1115,9 @@ const styles = StyleSheet.create({
   tabLabel: { color: '#8B948E', fontSize: 11, fontWeight: '700' },
   tabLabelActive: { color: palette.leaf },
   bedDetailContent: { padding: 20, paddingBottom: 60, gap: 20 },
+  mapPreview: { position: 'relative', overflow: 'hidden', borderRadius: 14, backgroundColor: '#000000' },
+  inspectPill: { position: 'absolute', right: 12, bottom: 12, height: 34, paddingHorizontal: 12, borderRadius: 17, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(0,0,0,0.72)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.28)' },
+  inspectPillText: { color: '#FFFFFF', fontSize: 11, fontWeight: '900' },
   detailHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   detailTitleWrap: { alignItems: 'center' },
   detailTitle: { color: palette.ink, fontSize: 20, fontWeight: '900' },
@@ -1098,6 +1191,15 @@ const styles = StyleSheet.create({
   twoButtons: { flexDirection: 'row', gap: 10 },
   inputError: { borderColor: '#D6786E' },
   estimateCard: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, padding: 14, borderRadius: 16, backgroundColor: palette.lime },
+  plantGuideCard: { gap: 12, padding: 15, borderRadius: 18, backgroundColor: '#FFFFFF', borderWidth: 1, borderColor: palette.line },
+  plantGuideHeading: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  plantGuideTitle: { color: palette.ink, fontSize: 15, fontWeight: '900' },
+  plantGuideSource: { color: palette.muted, fontSize: 10, fontWeight: '700', marginTop: 2 },
+  plantGuideMetrics: { flexDirection: 'row', flexWrap: 'wrap', rowGap: 10 },
+  plantGuideMetric: { width: '50%' },
+  plantGuideAdvice: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, padding: 10, borderRadius: 13, backgroundColor: '#E9FFB7' },
+  plantGuideAdviceText: { flex: 1, color: palette.ink, fontSize: 12, lineHeight: 17, fontWeight: '700' },
+  plantGuideTip: { color: palette.muted, fontSize: 12, lineHeight: 18 },
   notesInput: { minHeight: 88, height: 88, paddingTop: 14, textAlignVertical: 'top' },
   suggestions: { overflow: 'hidden', borderRadius: 16, borderWidth: 1, borderColor: palette.line, backgroundColor: '#FFFFFF' },
   suggestion: { minHeight: 48, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: palette.line },

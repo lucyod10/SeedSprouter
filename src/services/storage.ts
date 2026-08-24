@@ -58,6 +58,11 @@ function isValidData(value: unknown): value is AppData {
   if (value.schemaVersion !== undefined && (!Number.isInteger(value.schemaVersion) || Number(value.schemaVersion) < 1)) return false;
   return value.beds.every((bed) => {
     if (!isObject(bed) || typeof bed.id !== 'string' || typeof bed.name !== 'string' || !Array.isArray(bed.cycles)) return false;
+    if (bed.careEvents !== undefined && (!Array.isArray(bed.careEvents) || !bed.careEvents.every((event) => isObject(event)
+      && typeof event.id === 'string'
+      && typeof event.type === 'string'
+      && typeof event.completedAt === 'string'
+      && (event.scheduledFor === undefined || typeof event.scheduledFor === 'string')))) return false;
     return bed.cycles.every((cycle) => {
       if (!isObject(cycle) || typeof cycle.id !== 'string' || typeof cycle.coverPhotoUri !== 'string' || !Array.isArray(cycle.rows) || !Array.isArray(cycle.progress)) return false;
       return cycle.rows.every((row) => isObject(row) && typeof row.id === 'string' && typeof row.cropName === 'string' && Array.isArray(row.path));

@@ -2,10 +2,11 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Haptics from 'expo-haptics';
 import { useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { keepPhoto } from '../services/media';
 import { PlantedRow } from '../types';
+import { GardenImage } from './GardenImage';
 import { PhotoMap } from './PhotoMap';
 import { palette } from './Ui';
 
@@ -39,7 +40,7 @@ export function ProgressCamera({ visible, referenceUri, rows, onClose, onUsePhot
     if (!camera.current || !ready || capturing) return;
     setCapturing(true);
     try {
-      const photo = await camera.current.takePictureAsync({ quality: 0.86 });
+      const photo = await camera.current.takePictureAsync({ quality: 1 });
       const permanentUri = await keepPhoto(photo.uri);
       setCapturedUri(permanentUri);
       setAlignmentVisible(false);
@@ -65,7 +66,7 @@ export function ProgressCamera({ visible, referenceUri, rows, onClose, onUsePhot
   };
 
   return (
-    <Modal visible={visible} animationType="fade" presentationStyle="fullScreen" onRequestClose={close}>
+    <Modal visible={visible} animationType="none" presentationStyle="fullScreen" onRequestClose={close}>
       <View style={cameraStyles.root} onLayout={(event) => setHeight(event.nativeEvent.layout.height)}>
         {!permission ? <View style={cameraStyles.center}><ActivityIndicator color="#FFFFFF" /></View> : !permission.granted ? (
           <View style={cameraStyles.permission}>
@@ -75,14 +76,14 @@ export function ProgressCamera({ visible, referenceUri, rows, onClose, onUsePhot
             <Pressable onPress={requestPermission} style={cameraStyles.permissionButton}><Text style={cameraStyles.permissionButtonText}>Allow camera</Text></Pressable>
           </View>
         ) : capturedUri ? (
-          <Image source={{ uri: capturedUri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+          <GardenImage uri={capturedUri} style={StyleSheet.absoluteFill} resizeMode="cover" />
         ) : (
           <CameraView ref={camera} style={StyleSheet.absoluteFill} facing="back" mode="picture" onCameraReady={() => setReady(true)} />
         )}
 
         {permission?.granted && alignmentVisible ? (
           <View style={[StyleSheet.absoluteFill, { opacity: onionOpacity }]} pointerEvents="none">
-            <PhotoMap uri={referenceUri} rows={rows} height={height} borderRadius={0} />
+            <PhotoMap uri={referenceUri} rows={rows} height={height} borderRadius={0} resizeMode="cover" />
           </View>
         ) : null}
 
