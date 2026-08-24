@@ -1,25 +1,64 @@
 {
   "expo": {
-    "name": "garden-bed",
-    "slug": "garden-bed",
+    "name": "Seed Sprouter",
+    "slug": "seed-sprouter",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
+    "scheme": "seedsprouter",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.seedsprouter.garden",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Seed Sprouter uses the camera to photograph garden beds, growing progress and seed packets.",
+        "NSPhotoLibraryUsageDescription": "Seed Sprouter lets you choose garden and seed packet photos from your library.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
-      },
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-dev-client",
+      "expo-font",
+      "expo-sqlite",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#FAFAFA",
+          "image": "./assets/brand-leaf.png",
+          "imageWidth": 164,
+          "resizeMode": "contain"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Choose garden bed, progress and seed packet photos.",
+          "cameraPermission": "Photograph garden beds, growing progress and seed packets.",
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Seed Sprouter uses the camera to align and photograph garden progress.",
+          "recordAudioAndroid": false,
+          "barcodeScannerEnabled": false
+        }
+      ],
+      "expo-notifications"
+    ],
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "0284fe44-2032-4e9e-8792-c6465b333a38"
+      }
     }
   }
 }
